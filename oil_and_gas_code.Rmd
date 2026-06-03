@@ -1,0 +1,594 @@
+---
+title: "Oil/Gas Project"
+author: "Darshan Sivarjah, Shaohang Chen, Ariel Tang, Madeline Hughes"
+date: '`r format(Sys.time(), "%B %d, %Y")`'
+output:
+  pdf_document:
+    latex_engine: xelatex
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{longtable}
+  - \usepackage{array}
+---
+
+```{r Front Matter, include=FALSE}
+
+# clean up & set default chunk options
+rm(list = ls())
+knitr::opts_chunk$set(echo = FALSE)
+options(dplyr.summarise.inform = FALSE)
+
+#packages
+library(readxl)
+library(dplyr)
+library(janitor)
+library(ggplot2)
+library(kableExtra)
+library(purrr)
+library(mosaic)
+library(stringr)
+library(knitr)
+library(broom)
+library(survival)
+
+#download data
+read_and_clean <- function(file_path) {
+  df <- read_excel(file_path, col_types = "text", na = c("", "NA")) %>%
+    clean_names() %>%
+    mutate(report_date = as.character(report_date),
+           across(c(oil, gas, wtr, days, flared), ~as.numeric(gsub(",", "", trimws(as.character(.))))),
+           api_wellno = as.character(api_wellno))
+  
+  file_name <- basename(file_path)
+  date_str <- str_extract(file_name, "\\d{4}_\\d{2}")
+  year <- as.integer(substr(date_str, 1, 4))
+  month <- as.integer(substr(date_str, 6, 7))
+  
+  df %>%
+    mutate(year = year, month = month, date = as.Date(paste(year, month, "15", sep = "-")))
+}
+
+files <- list.files("~/Desktop/STAT 470W/Oil and Gas Project/data", pattern = "\\.xlsx$", full.names = TRUE)
+files <- files[!grepl("^~\\$", basename(files))]
+df_all <- lapply(files, read_and_clean) %>%
+  bind_rows()
+#change the file path to where you keep all your data eg. "~/Downloads/"
+
+df_horizontal_bakken <- df_all %>%
+  filter(company %in% c(
+    "WHITING OIL AND GAS CORPORATION",
+    "XTO ENERGY INC")) %>%
+  filter(grepl("H$", well_name)) #only horizontal wells
+
+```
+
+
+```{r, results='hide'}
+#glimpse(df_horizontal_bakken)
+#colSums(is.na(df_horizontal_bakken[, c("oil", "gas", "wtr", "days", "flared")]))
+```
+
+
+# Executive Summary
+
+This project analyzes how oil and gas firms adjusted production during the COVID-19 shock in 2020, with a focus on shut-in decisions for horizontal wells. The analysis highlights clear variation in shut-in behavior across wells and firms, suggesting that production levels and operational characteristics play an important role in these decisions. The results indicate that firms did not respond uniformly to the market downturn, and that well-specific factors are key to understanding both the likelihood and duration of shut-ins. These findings provide useful insights into how energy producers manage operations under extreme economic conditions and can inform future modeling and decision-making in similar scenarios.
+
+# Project Description
+
+This study is an observational analysis using monthly well-level production data from 2020. The project is in the analysis stage and focuses on examining the shut-in behavior of oil and gas wells in response to the COVID-19 shock, which led to a sharp decline in energy demand and prices. The analysis is restricted to horizontal wells to ensure comparability and centers on firms operating in the Bakken region, specifically Whiting and XTO. 
+
+The objective of the study is to identify which wells were shut in and to determine how factors such as production levels, wastewater output, and geographic location influence shut-in decisions. The analysis will first summarize shut-in patterns over time, then estimate probit models for shut-in decisions after February 2020, and finally apply duration models to examine how long wells remain shut in. The results are intended to provide insight into firm and well-level responses to economic shocks in the energy sector.
+
+The economic context of this analysis is critical. In April 2020, Whiting Petroleum Corporation, a major operator in the Bakken region, filed for Chapter 11 bankruptcy following the collapse in oil prices during the COVID-19 pandemic. This highlights the severity of the financial pressures faced by firms in this period. As a result, shut-in decisions were likely influenced not only by production characteristics but also by financial constraints and broader firm-level considerations.
+
+## Research Questions
+
+**Question 1:** Do shut-in behaviors differ between firms, particularly between Whiting and XTO in the Bakken region?
+
+**Question 2:** How long do wells remain shut in before returning to production, and are shut-in durations influenced by firm behavior and well characteristics?
+
+
+## Statistical Questions:
+
+**Question 1:** Can a probit model adequately explain shut-in decisions based on observable well characteristics?
+
+**Question 2:** Is it statistically appropriate to combine Whiting and XTO wells into a single model, or should they be modeled separately?
+
+
+# Exploratory Data Analysis (EDA)
+
+## Data Overview
+
+The data used in this analysis comes from a site that is maintained by the North Dakota State Government's Department of Mineral Resources. They offer a monthly production report that lists production and operational details for oil and gas wells across North Dakota. We are specifically interested in the Bakken region. Data in these reports are provided by the companies running the wells via required reporting systems. Each record in the datasets represents a single well's production for the month, which gives us a granular perspective relative to aggregated areas or overall company performance. We specifically pulled datasets from January of 2020 to December of 2021. 
+
+```{r}
+variables_table <- data.frame(
+  Variable = c(
+    "api_wellno", "company", "month", "date",
+    "oil", "gas", "wtr", "days", "flared",
+    "lat", "long", "well_name",
+    "production", "shut_in", "recovered"
+  ),
+  Type = c(
+    "Identifier", "Categorical", "Time", "Date",
+    "Numeric", "Numeric", "Numeric", "Numeric", "Numeric",
+    "Numeric", "Numeric", "Character",
+    "Numeric (derived)", "Binary (derived)", "Binary (derived)"
+  ),
+  Description = c(
+    "Unique well identifier",
+    "Operator name",
+    "Month of observation",
+    "Date of observation",
+    "Monthly oil production (barrels)",
+    "Monthly gas production (MCF)",
+    "Water production (wastewater)",
+    "Number of production days",
+    "Gas flared",
+    "Latitude of well",
+    "Longitude of well",
+    "Well name (used to identify horizontal wells)",
+    "Total production (oil + gas/6)",
+    "Indicator for shut-in (<50% of previous month)",
+    "Indicator for recovery (>=75% of pre-shut production)"
+  )
+)
+
+kable(
+  variables_table,
+  format = "latex",
+  booktabs = TRUE,
+  caption = "Summary of Variables Used in the Analysis",
+  col.names = c("Variable Name", "Type", "Description"),
+  align = c("l", "c", "l")
+) %>%
+  kable_styling(latex_options = c("hold_position"), full_width = FALSE)
+```
+
+The report identifies these individual wells using a unique identifier (API well number). The company is listed, as well as geographic information, and production variables (oil, wastewater, and gas produced). These can be viewed in Table 1. To better serve our analysis, we created our own features. The first is production, which we defined as oil + (gas / 6). This follows the industry standard of dividing gas, measured in MCF (thousand cubic feet), by 6 to convert the value into an energy output equivalent to a barrel of oil. We also created complementing features shut_in and recovered, which are described in Table 1. 
+
+A major limitation with this dataset is that there is no accompanying literature to describe the features. Important features such as oil, gas, and wtr (water produced) don't have units. This is critical, as a difference in units can lead to wild misunderstanding if interpreted incorrectly. To move forward with this data, we had to make the assumption that the dataset is using the most common and conventional production units. 
+
+
+## Visualizations
+
+```{r}
+df_horizontal_bakken <- df_horizontal_bakken %>%
+  mutate(production = oil + (gas / 6)) %>%
+  arrange(api_wellno, month) %>%
+  group_by(api_wellno) %>%
+  mutate(
+    lag_production = lag(production),
+    prod_ratio = ifelse(lag_production > 0, production / lag_production, NA),
+    
+    # Shut-in definition
+    shut_in = ifelse(!is.na(prod_ratio) & prod_ratio < 0.5, 1, 0),
+    
+    # Recovery definition (75% of pre-shut production)
+    pre_shut_prod = lag_production,
+    recovered = ifelse(production >= 0.75 * pre_shut_prod, 1, 0)
+  ) %>%
+  ungroup()
+```
+
+
+```{r fig-monthly-production, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Monthly total production for Whiting and XTO over time, showing a sharp decline beginning in March 2020."}
+# Monthly production by company
+monthly_prod <- df_horizontal_bakken %>%
+  group_by(date, company) %>%
+  summarise(total_production = sum(production, na.rm = TRUE), .groups = "drop") %>%
+  arrange(company, date)
+
+ggplot(monthly_prod, aes(x = date, y = total_production, color = company, group = company)) +
+  geom_line() +
+  labs(title = "Monthly Production by Firm", x = "Month", y = "Total Production")  +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0.5)) +
+  scale_x_date(date_breaks = "1 month") +
+  geom_vline(xintercept = as.Date("2020-03-15"), color = "red", linetype = "dashed")
+```
+
+```{r fig-shutin-rate, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Monthly shut-in rate for Whiting and XTO, showing a sharp increase following the COVID-19 shock in early 2020."}
+# Shut-in rate
+monthly_shutin <- df_horizontal_bakken %>%
+  group_by(date, company) %>%
+  summarise(shut_in_rate = mean(shut_in, na.rm = TRUE), .groups = "drop")
+
+ggplot(monthly_shutin, aes(x = date, y = shut_in_rate, color = company, group = company)) +
+  geom_line() +
+  labs(title = "Shut-in Rate Over Time", x = "Month", y = "Shut-in Rate") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0.5)) +
+  scale_x_date(date_breaks = "1 month") +
+  geom_vline(xintercept = as.Date("2020-03-15"), color = "red", linetype = "dashed")
+```
+
+The observed separation in production levels suggests that Whiting operated a substantially larger or more productive portfolio of wells compared to XTO. As shown in Figure 1, this difference is important because firms with higher baseline production may face different economic incentives when deciding whether to shut in wells. In particular, larger producers may be more sensitive to price shocks due to higher operating costs and exposure to market fluctuations.
+
+The temporary increases in production during 2020 may reflect partial operational recovery after the initial COVID-19 shock. While causality cannot be established, these patterns are consistent with improving demand conditions and stabilization in oil prices (Figure 1). 
+
+The sharp increase in shut-in rates immediately following March 2020 aligns with the collapse in oil demand and prices during the early stages of the COVID-19 pandemic. As shown in Figure 2, the similarity in shut-in patterns across firms suggests that both were responding to the same external market shock, although later divergence may reflect firm-specific strategies or financial constraints. This directly addresses the requirement to calculate monthly shut-in percentages for each firm.
+
+```{r fig-shutin-duration, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Distribution of shut-in durations across wells, showing that most shut-in episodes last approximately one month."}
+# Identify shut-in episodes
+df_horizontal_bakken <- df_horizontal_bakken %>%
+  arrange(api_wellno, date) %>%
+  group_by(api_wellno) %>%
+  mutate(shut_group = cumsum(shut_in == 1 & lag(shut_in, default = 0) == 0)) %>%
+  ungroup()
+
+# Duration per episode
+duration_data <- df_horizontal_bakken %>%
+  filter(shut_in == 1) %>%
+  group_by(api_wellno, shut_group) %>%
+  summarise(duration = n())
+
+# Histogram of durations
+ggplot(duration_data, aes(x = duration)) +
+  geom_histogram(bins = 30) +
+  labs(title = "Distribution of Shut-in Durations") +
+  scale_x_continuous(breaks = seq(0, 20, by = 1)) +
+  scale_y_continuous(breaks = seq(0, 2000, by = 200))
+
+#duration_data %>%
+#  dplyr::group_by(duration) %>%
+#  dplyr::summarize(count = dplyr::n())
+```
+
+As shown in Figure 3, most shut-in episodes lasted approximately one month, indicating that firms primarily used shut-in as a short-term response to unfavorable market conditions. This suggests that many wells remained economically viable but were temporarily taken offline due to low prices. However, a small number of wells experienced extended shut-in durations of up to 12 months, which may indicate wells with persistently low productivity or those affected by longer-term strategic or financial considerations. 
+
+
+```{r fig-prod-quartile, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Shut-in rate by production quartile after February 2020, showing higher shut-in rates among lower-producing wells."}
+# Subset to post-COVID period 
+df_analysis <- df_horizontal_bakken %>%
+  filter(date >= as.Date("2020-03-01"))
+
+# Create production quartiles
+df_analysis <- df_analysis %>%
+  mutate(prod_group = ntile(production, 4))
+
+# Shut-in rate by production quartile
+prod_analysis <- df_analysis %>%
+  group_by(prod_group, company) %>%
+  summarise(
+    shut_in_rate = mean(shut_in, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+ggplot(prod_analysis, aes(x = factor(prod_group), y = shut_in_rate, fill = company)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  labs(
+    title = "Shut-in Rate by Production Quartile (Post-Feb 2020)",
+    x = "Production Quartile (1 = lowest, 4 = highest)",
+    y = "Shut-in Rate"
+  )
+
+#df_analysis %>%
+#  group_by(shut_in) %>%
+#  summarise(
+#    mean_prod = mean(production, na.rm = TRUE),
+#    median_prod = median(production, na.rm = TRUE),
+#    n = n(),
+#    .groups = "drop"
+#  )
+```
+
+```{r fig-boxplot-production, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Production distribution by shut-in status (log scale), comparing production levels for shut-in and non-shut-in wells across firms."}
+# Boxplot: Production vs Shut-in status
+ggplot(df_analysis, aes(x = factor(shut_in), y = production, fill = company)) +
+  geom_boxplot() +
+  scale_y_log10() +
+  labs(
+    title = "Production Distribution by Shut-in Status (Log Scale)",
+    x = "Shut-in (0 = No, 1 = Yes)",
+    y = "Production (log scale)"
+  )
+```
+
+
+Shut-in rates vary across production quartiles, with the highest rates observed among the lowest-producing wells (Figure 4). This pattern suggests that firms prioritized keeping higher-output wells active while shutting in less productive wells during the COVID-19 downturn. While the relationship is not perfectly monotonic, the overall trend indicates that production level is an important determinant of shut-in decisions.
+
+The log-scaled boxplot shows that production distributions overlap substantially across shut-in statuses (Figure 5), indicating that differences are not driven solely by extreme values. However, the higher frequency of shut-ins among lower-producing wells supports the hypothesis that firms selectively reduce output from less economically efficient wells during periods of economic stress.
+
+
+# Statistical Analysis 
+
+To formally evaluate the relationship between well characteristics and shut-in decisions, we created probit models, as recommended by the project brief. We also created logit models, which serve as robustness checks to assess whether the findings are sensitive to the choice of link function. To make a clear, evidence-based statement, we conducted hypothesis tests using the probit models. The hypotheses are as follows:
+
+$$
+\begin{aligned}
+H_0 &: \text{Well characteristics have no effect on shut-in probability} \\
+H_1 &: \text{At least one characteristic affects shut-in probability}
+\end{aligned}
+$$
+
+
+```{r}
+model_data <- df_horizontal_bakken %>%
+  group_by(api_wellno) %>%
+  mutate(
+    lag_wtr = lag(wtr),
+    shut_in_before_march = any(month < 3 & year == 2020 & shut_in == 1, na.rm = TRUE),
+    log_lag_production = log1p(lag_production),
+    log_lag_wtr = log1p(lag_wtr)
+  ) %>%
+  ungroup() %>%
+  filter(
+    date >= as.Date("2020-03-15"), 
+    shut_in_before_march == FALSE,
+    !is.na(shut_in),
+    !is.na(log_lag_production),
+    !is.na(log_lag_wtr),
+    !is.na(lat),
+    !is.na(long)
+  ) %>%
+  mutate(
+  company = factor(company),
+  month_factor = factor(month),
+  lat = as.numeric(lat),
+  long = as.numeric(long)
+)
+
+
+```
+
+We fit separate models for each firm, as well as a combined model, to assess whether pooling the data is appropriate. It is also worth noting that a log transformation was applied to production and wastewater variables to reduce skewness and limit the influence of extreme values. 
+
+
+```{r}
+# Probit models
+
+# Whiting only
+probit_whiting <- glm(
+  shut_in ~ log_lag_production + log_lag_wtr + lat + long + month_factor,
+  data = model_data %>% filter(company == "WHITING OIL AND GAS CORPORATION"),
+  family = binomial(link = "probit")
+)
+
+# XTO only
+probit_xto <- glm(
+  shut_in ~ log_lag_production + log_lag_wtr + lat + long + month_factor,
+  data = model_data %>% filter(company == "XTO ENERGY INC"),
+  family = binomial(link = "probit")
+)
+
+# Combined Whiting and XTO
+probit_combined <- glm(
+  shut_in ~ log_lag_production + log_lag_wtr + lat + long + month_factor,
+  data = model_data,
+  family = binomial(link = "probit")
+)
+```
+
+```{r}
+tidy(probit_whiting, conf.int = TRUE) %>%
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Whiting Probit Model Results"
+  ) %>%
+  kable_styling(latex_options = c("hold_position"), full_width = FALSE)
+
+tidy(probit_xto, conf.int = TRUE) %>%
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "XTO Probit Model Results"
+  ) %>%
+  kable_styling(latex_options = c("hold_position"), full_width = FALSE)
+
+tidy(probit_combined, conf.int = TRUE) %>%
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Combined Probit Model Results"
+  ) %>%
+  kable_styling(latex_options = c("hold_position"), full_width = FALSE)
+```
+
+The probit model results in (Tables 2-4) 
+
+indicate that shut-in decisions were driven by a combination of production factors and location, and across both firms the production levels and wastewater production both having statistically significant effects on shut in duration, suggesting that higher levels of both could have a higher influence on the decision to shut in. 
+
+The effects of well geography also play a role, with noticeable effects with both firms (Tables 2-3), though latitude seems to not be significant for XTO (Table 3)
+
+The timing of the COVID-19 pandemic seemed to more heavily affect Whiting than XTO, with every month other than may being significant in prediction, with March of 2020 being extra significant (Table 2) whereas XTO has only March of 2020 as a significant predictor out of all the months (Table 3), which lines up with the start of state issued lockdowns.
+
+Overall, these results suggest that shut in behaviors is influenced by both the external market conditions as well as the production fo the firms. Pooling the firms together may obscure differences in behavior, as we saw with the difference in significance with months of the two firms.
+
+
+```{r}
+# whiting only:
+logit_whiting <- glm(shut_in ~ log_lag_production + log_lag_wtr + lat + long + month_factor,
+                     data = model_data %>% filter(company == "WHITING OIL AND GAS CORPORATION"),
+                     family = binomial(link = "logit"))
+```
+
+```{r}
+# xto only:
+logit_xto <- glm(shut_in ~ log_lag_production + log_lag_wtr + lat + long + month_factor,
+                     data = model_data %>% filter(company == "XTO ENERGY INC"),
+                     family = binomial(link = "logit"))
+```
+
+```{r}
+# whiting and xto:
+logit_combined <- glm(shut_in ~ log_lag_production + log_lag_wtr + lat + long + month_factor,
+                      data = model_data,
+                      family = binomial(link = "logit"))
+```
+
+
+Logit models were estimated as a robustness check. The results were consistent with the probit models, so the report focuses on the probit results.
+
+
+
+```{r}
+model_pooled <- glm(
+  shut_in ~ log_lag_production + log_lag_wtr + lat + long + month_factor,
+  data = model_data,
+  family = binomial(link = "probit")
+)
+
+```
+
+```{r}
+model_interaction <- glm(
+  shut_in ~ (log_lag_production + log_lag_wtr + lat + long + month_factor) * company,
+  data = model_data,
+  family = binomial(link = "probit")
+)
+```
+
+```{r anova-test, echo=FALSE, message=FALSE, warning=FALSE}
+lrt_result <- anova(model_pooled, model_interaction, test = "Chisq")
+
+kable(
+  lrt_result,
+  format = "latex",
+  booktabs = TRUE,
+  caption = "Likelihood Ratio Test for Firm Pooling"
+) %>%
+  kable_styling(latex_options = c("hold_position"), full_width = FALSE)
+```
+
+To formally assess whether it is appropriate to create a single, combined model that can be applied to both firms, a likelihood ratio test was conducted comparing a pooled model to a model with interaction terms, allowing coefficients to vary by firm (Table 8).
+
+The results show a significant improvement in model fit when allowing for firm-specific effects (Deviance = 79.646, p < 1.927e-10). This indicates that the relationship between well characteristics and shut-in decisions differs across firms. Therefore, it is not statistically appropriate to pool Whiting and XTO wells into a single model, and separate models provide a more accurate representation of firm behavior.
+
+
+## Cox Proportional Hazards Model
+
+```{r}
+# Fix lat/long type before survival model
+df_horizontal_bakken <- df_horizontal_bakken %>%
+  mutate(
+    lat = as.numeric(lat),
+    long = as.numeric(long),
+    wtr = as.numeric(wtr)
+  )
+```
+
+```{r cox-model, echo=FALSE, message=FALSE, warning=FALSE}
+# create survival data
+surv_data <- df_horizontal_bakken %>%
+  arrange(api_wellno, date) %>%
+  group_by(api_wellno) %>%
+  mutate(
+    shut_group = cumsum(shut_in == 1 & lag(shut_in, default = 0) == 0)
+  ) %>%
+  ungroup() %>%
+  filter(shut_in == 1) %>%
+  group_by(api_wellno, shut_group) %>%
+  summarise(
+    duration = n(),
+    company = first(company),
+    production = first(production),
+    wtr = first(wtr),
+    lat = first(lat),
+    long = first(long),
+    .groups = "drop"
+  )
+
+# Cox model
+cox_model <- coxph(
+  Surv(duration) ~ log1p(production) + log1p(wtr) + lat + long + company,
+  data = surv_data
+)
+
+tidy(cox_model, exponentiate = TRUE, conf.int = TRUE) %>%
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    caption = "Cox Proportional Hazards Model Results"
+  ) %>%
+  kable_styling(latex_options = c("hold_position"), full_width = FALSE)
+```
+
+To analyze the duration of shut-in periods and identify factors that influence the speed of their return, we employed Cox models (Table 9). The hypotheses for this model are presented below:
+
+
+$$
+\begin{aligned}
+H_0 &: \text{Well characteristics have no effect on how long wells remain shut in} \\
+H_1 &: \text{Well characteristics significantly affect the duration of shut-in}
+\end{aligned}
+$$
+
+The results show that neither production nor wastewater were significant predictors for recovery, though wastewater production was close to being significant with (p ≈ 0.076), indicating that wells with higher wastewater may have higher chance, but is not important enough to note.
+
+The latitudes and longitudes seem to play a bigger part with with (p ≈ 0.00001) for lat and (p ≈ 0.003) for Longitude respectively. This implys that the geographical location of these wells may play a part in their rate of recovery
+
+Firm-level differences are also important. Wells operated by XTO have a significantly lower hazard rate compared to Whiting (p < 0.01), suggesting that XTO wells tend to remain shut in for longer periods.
+
+Overall, these results suggest that shut-in duration is influenced by both well characteristics and firm behavior. While most shut-ins are temporary, the time required for wells to return to production varies systematically across wells and firms.
+
+
+# Recommendations 
+
+**Question 1:** Do shut-in behaviors differ between firms, particularly between Whiting and XTO in the Bakken region?
+
+Shut-in behavior does differ between firms, with Whiting seemingly more effected overall by the initial COVID-19 shock with significance across all months. The probit model results show that the probability of shut-in increased significantly for both firms in March, indicating a strong common response to market conditions despite initial responses.
+
+The influences of well characteristics and geographic location does seem identical with the two firms, though with latitude being not significant for XTO we can say that XTO might not been as effected by their location as much as Whiting. 
+
+**Question 2:** How long do wells remain shut in before returning to production, and are shut-in durations influenced by firm behavior and well characteristics?
+
+The Cox model results suggest that shut-in duration is influenced by both well characteristics and firm behavior. Most shut-in episodes are relatively short, with many wells returning to production within about one month. However, among wells that were shut in, the geographical locations in latitude and longitude seem to be significant predictors in time before return. 
+
+The model also shows that XTO wells tended to remain shut in longer than Whiting wells, indicating that firm-level differences played a role in recovery timing.\ Overall, shut-ins were generally temporary, but the duration of shut-ins was not random; it varied based the firm's behaviors and the well's location.
+
+
+## Statistical Questions:
+
+**Question 1:** Can a probit model adequately explain shut-in decisions based on observable well characteristics?
+
+The probit model provides evidence that shut-in decisions can be partially explained by observable well characteristics and geographical data, though the way each firm reacted to shut ins throughout the months were different. In particular, the months of the year played as a significant predictor for Whiting but not for XTO for all except March, where it was significant for both. 
+
+**Question 2:** Is it statistically appropriate to combine Whiting and XTO wells into a single model, or should they be modeled separately?
+
+The comparison between firm-specific models and the combined model suggests that it may not be appropriate to simply pool Whiting and XTO wells into a single model. Differences in coefficient significance and interpretation—particularly for production and geographic variables—indicate that firm behavior is heterogeneous. As a result, separate models provide a more accurate representation of shut-in decision-making across firms.
+
+
+# Additional Considerations
+
+## Limitations
+
+This analysis is subject to several limitations. The definition of a shut-in is based on a production threshold (less than 50% of the previous month), which was validated through exploratory analysis. While this provides a consistent and data-driven rule, it may not perfectly capture all true operational shut-ins. Some wells may experience production declines due to mechanical issues or natural depletion rather than deliberate firm decisions. While EDA suggests a relationship between production and shut-in behavior, the regression results indicate that this effect is not statistically significant for all firms.
+
+In addition, the Cox model does not explicitly account for censoring of wells that did not return to production within the observation window.
+
+Finally, the dataset is limited to two firms operating in the Bakken region, which may restrict the generalizability of the results to other firms or geographic areas. The use of monthly data also limits the ability to capture shorter-term production adjustments that may occur within a given month.
+
+
+## Concerns and Future Research
+
+A key concern is the absence of direct economic variables, such as oil prices, operating costs, or firm-level financial data. While the timing of shut-ins aligns with the COVID-19 shock, the analysis cannot directly quantify the effect of price changes on shut-in decisions. Future research could incorporate external data sources, such as oil price time series or firm financial indicators, to better isolate the drivers of shut-in behavior. Expanding the analysis to include additional firms or regions would also improve the robustness of the findings.
+
+In addition, while this study includes a Cox proportional hazards model to analyze shut-in duration, further extensions—such as incorporating time-varying covariates or more detailed operational data—could provide deeper insight into the dynamics of shut-ins over time.
+
+## Technical Comments
+
+Several modeling choices may influence the results. The use of log transformations helps reduce skewness in production variables, but may also affect interpretability. The logistic and probit models assume independence across observations, which may not fully account for repeated measurements from the same well over time.
+
+Furthermore, while separate models were estimated for each firm, unobserved heterogeneity may still be present at the well level. Incorporating fixed effects or random effects models could better account for these differences.
+
+Finally potential measurement error in reported production values may introduce additional uncertainty into the estimates.
+
+
+# References 
+
+1. U.S. Energy Information Administration. Petroleum & Other Liquids: RBRTE (Monthly Data). U.S. Department of Energy. https://www.eia.gov/dnav/pet/hist/LeafHandler.ashx?n=PET&s=RBRTE&f=M
+
+
+# Technical Appendix  
+
+Detailed information and a copy of code and or software results.  Additional graphs and supporting figures may also be placed in the appendix.
+
+
+### R Script
+
+```{r ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE}
+
+```
+
+
+
